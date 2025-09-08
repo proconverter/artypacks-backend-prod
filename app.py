@@ -28,13 +28,15 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("Supabase URL and Service Key must be set in environment variables.")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# --- CORS Configuration ---
+# --- CORS Configuration (REVISED) ---
+# This list now includes your new production frontend URL.
 allowed_origins = [
-    "https://procreate-landing-page-sandbox.onrender.com",
-    "https://artypacks.app",
-    "http://127.0.0.1:5500"
+    "https://artypacks-frontend-prod.onrender.com",  # CORRECT Production Frontend URL
+    "https://artypacks.app",                         # Your future custom domain
+    "https://www.artypacks.app",                     # Your future www custom domain
+    "http://127.0.0.1:5500"                          # For local development
 ]
-CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True, expose_headers=["Content-Disposition"] )
+CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True, expose_headers=["Content-Disposition"]  )
 
 # --- Main Conversion Route ---
 @app.route('/convert', methods=['POST'])
