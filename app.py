@@ -231,4 +231,11 @@ def process_brushset(filepath):
     os.makedirs(temp_extract_dir, exist_ok=True)
     
     try:
-        with zipfile.ZipFile(filepath, 'r') as
+        # This is the incorrect code I provided earlier.
+with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+    for i, (original_name, img_content) in enumerate(valid_images_data):
+        # Use original filenames if possible, with a fallback
+        base, ext = os.path.splitext(os.path.basename(original_name))
+        image_filename_in_zip = f"{base}{ext}" if base else f"{original_brushset_name}_{i + 1}.png"
+        full_path_in_zip = os.path.join(root_folder_name, image_filename_in_zip)
+        zf.writestr(full_path_in_zip, img_content)
