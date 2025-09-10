@@ -29,12 +29,11 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- CORS Configuration ---
-# This list includes your production frontend URL and future custom domains.
 allowed_origins = [
     "https://artypacks-frontend-prod.onrender.com",
     "https://artypacks.app",
     "https://www.artypacks.app",
-    "http://127.0.0.1:5500"  # For local development
+    "http://127.0.0.1:5500"
 ]
 CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True, expose_headers=["Content-Disposition"] )
 
@@ -45,32 +44,23 @@ def convert_files():
     if not license_key:
         return jsonify({"message": "License key is required."}), 401
 
-    # --- Step 1: Validate and Decrement Credit using a Database Function ---
-    # This block calls a PostgreSQL function named 'use_one_credit' which will handle
-    # all validation (key exists, is active, has credits) and decrementing in a single, atomic transaction.
     try:
         with engine.connect() as connection:
             trans = connection.begin()
             try:
-                # The SQL function returns a record: (success_boolean, message_text)
                 result = connection.execute(text("SELECT * FROM use_one_credit(:p_license_key)"), {'p_license_key': license_key}).fetchone()
-                
-                # If the first column (success) is false, the function failed.
                 if not result or not result[0]:
                     message = result[1] if result and result[1] else 'Invalid license or no credits remaining.'
                     trans.rollback()
-                    return jsonify({"message": message}), 403 # 403 Forbidden is appropriate here
-                
-                # If successful, commit the transaction.
+                    return jsonify({"message": message}), 403
                 trans.commit()
             except Exception as db_exc:
                 trans.rollback()
-                raise db_exc # Re-raise the exception to be caught by the outer block
+                raise db_exc
     except Exception as e:
         print(f"CRITICAL ERROR in /convert during credit use: {e}")
         return jsonify({"message": "A server error occurred during license validation."}), 500
 
-    # --- Step 2: Process the Uploaded File ---
     if 'file' not in request.files:
         return jsonify({"message": "No file was uploaded."}), 400
     file = request.files['file']
@@ -86,11 +76,8 @@ def convert_files():
             filepath = os.path.join(temp_dir, original_filename)
             file.save(filepath)
             
-            # --- Step 3: Perform the Core Conversion Logic ---
             zip_buffer, error = process_brushset(filepath)
             if error:
-                # IMPORTANT: If conversion fails, we must refund the credit.
-                # This is a simplified approach. A more robust system might queue this for an admin.
                 try:
                     with engine.connect() as connection:
                         connection.execute(text("UPDATE licenses SET credits_remaining = credits_remaining + 1 WHERE license_key = :key"), {'key': license_key})
@@ -98,10 +85,8 @@ def convert_files():
                         print(f"INFO: Credit refunded for {license_key} due to conversion failure.")
                 except Exception as refund_e:
                     print(f"CRITICAL ERROR: Failed to refund credit for {license_key}. Error: {refund_e}")
-                
                 return jsonify({"message": error}), 400
 
-            # --- Step 4: Upload to Supabase Storage and Record Conversion ---
             base_name = os.path.splitext(original_filename)[0]
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
             zip_filename_for_storage = f"ArtyPacks.app_{base_name}_{timestamp}.zip"
@@ -114,7 +99,6 @@ def convert_files():
             
             public_url = supabase.storage.from_("conversions").get_public_url(zip_filename_for_storage)
 
-            # This table is useful for the 'recover-session' feature.
             with engine.connect() as connection:
                 connection.execute(text(
                     "INSERT INTO conversions (license_key, original_filename, download_url) VALUES (:key, :orig_name, :url)"
@@ -144,7 +128,6 @@ def check_license():
     license_key = data['licenseKey']
     try:
         with engine.connect() as connection:
-            # This SQL function gets all relevant license details safely.
             result = connection.execute(text("SELECT * FROM get_license_status(:p_license_key)"), {'p_license_key': license_key}).fetchone()
             if not result:
                 return jsonify({"isValid": False, "message": "License key not found."}), 404
@@ -170,7 +153,6 @@ def recover_session():
 
     try:
         with engine.connect() as connection:
-            # A 'conversions' table is assumed to exist for this feature.
             query = text("""
                 SELECT original_filename, download_url 
                 FROM conversions 
@@ -183,7 +165,6 @@ def recover_session():
             if not results:
                 return jsonify({"message": "No recent conversions found for this license."}), 404
 
-            # Determine user_type to decide if it was a single or multi session
             license_type_query = text("SELECT p.credit_count FROM licenses l JOIN products p ON l.product_id = p.id WHERE l.license_key = :key")
             type_result = connection.execute(license_type_query, {'key': license_key}).fetchone()
             is_multi_credit = type_result and type_result[0] > 1
@@ -223,7 +204,12 @@ def download_all():
 
     master_zip_buffer.seek(0)
     master_zip_filename = f"ArtyPacks.app_Batch_{batch_counter}.zip"
-    return send_file(master_zip_buffer, as_attachment=True, download_name=master_zip_filename, mimetype='application/zip')
+    return send_file(
+        master_zip_buffer,
+        as_attachment=True,
+        download_name=master_zip_filename,
+        mimetype='application/zip'
+    )
 
 # --- Helper Functions ---
 def process_brushset(filepath):
@@ -231,11 +217,46 @@ def process_brushset(filepath):
     os.makedirs(temp_extract_dir, exist_ok=True)
     
     try:
-        # This is the incorrect code I provided earlier.
-with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-    for i, (original_name, img_content) in enumerate(valid_images_data):
-        # Use original filenames if possible, with a fallback
-        base, ext = os.path.splitext(os.path.basename(original_name))
-        image_filename_in_zip = f"{base}{ext}" if base else f"{original_brushset_name}_{i + 1}.png"
-        full_path_in_zip = os.path.join(root_folder_name, image_filename_in_zip)
-        zf.writestr(full_path_in_zip, img_content)
+        with zipfile.ZipFile(filepath, 'r') as brushset_zip:
+            image_files = [name for name in brushset_zip.namelist() if name.lower().endswith('.png') and 'artwork.png' not in name.lower()]
+            
+            if not image_files:
+                return None, "No valid stamp images were found in the brushset."
+
+            original_brushset_name = os.path.splitext(os.path.basename(filepath))[0]
+            root_folder_name = f"ArtyPacks.app_{original_brushset_name}"
+
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for i, image_file_name in enumerate(image_files):
+                    with brushset_zip.open(image_file_name) as img_file:
+                        img_content = img_file.read()
+                        image_filename_in_zip = f"{original_brushset_name}_{i + 1}.png"
+                        full_path_in_zip = os.path.join(root_folder_name, image_filename_in_zip)
+                        zf.writestr(full_path_in_zip, img_content)
+            
+            zip_buffer.seek(0)
+            return zip_buffer, None
+            
+    except zipfile.BadZipFile:
+        return None, "The provided file seems to be corrupted or isn't a valid .brushset."
+    except Exception as e:
+        print(f"Error in process_brushset: {e}")
+        return None, "An unexpected error occurred while processing the brushset."
+    finally:
+        if os.path.exists(temp_extract_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+# --- Uptime Ping Route ---
+@app.route('/ping', methods=['GET'])
+def ping():
+    """An endpoint for uptime monitoring services to keep the Render instance 'warm'."""
+    return jsonify({"status": "alive"}), 200
+
+# --- Root Route ---
+@app.route('/')
+def index():
+    return "ArtyPacks Converter Backend is running."
+
+if __name__ == "__main__":
+    app.run(debug=True)
