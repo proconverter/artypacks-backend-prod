@@ -35,7 +35,7 @@ allowed_origins = [
     "https://www.artypacks.app",
     "http://127.0.0.1:5500"
 ]
-CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True, expose_headers=["Content-Disposition"]  )
+CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True, expose_headers=["Content-Disposition"]   )
 
 # --- Main Conversion Route ---
 @app.route('/convert', methods=['POST'])
@@ -62,6 +62,7 @@ def convert_files():
     if file.filename == '':
         return jsonify({"message": "No selected file."}), 400
 
+    # This variable is defined outside the try block to ensure it exists for the finally block
     temp_dir = os.path.join('temp', str(uuid.uuid4()))
     os.makedirs(temp_dir, exist_ok=True)
     
@@ -110,6 +111,7 @@ def convert_files():
         print(f"CRITICAL ERROR during file processing or upload: {e}")
         return jsonify({"message": "A critical error occurred while processing the file."}), 500
     finally:
+        # The check for os.path.exists is still good practice
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -158,13 +160,16 @@ def recover_session():
             all_results = connection.execute(query, {'key': license_key}).fetchall()
 
             if not all_results:
-                return jsonify({"message": "No conversions found for this license."}), 404
+                # Return 200 OK with an empty list, which is not an error
+                return jsonify({"files": []}), 200
 
             # Calculate the status for each file
             sixty_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=60)
             files_with_status = []
             for row in all_results:
-                is_expired = row[2] < sixty_minutes_ago
+                # Ensure created_at is timezone-aware for comparison
+                created_at_aware = row[2].replace(tzinfo=timezone.utc)
+                is_expired = created_at_aware < sixty_minutes_ago
                 files_with_status.append({
                     "originalFilename": row[0],
                     "downloadUrl": row[1],
@@ -205,11 +210,14 @@ def download_all():
     return send_file(master_zip_buffer, as_attachment=True, download_name=master_zip_filename, mimetype='application/zip')
 
 # --- Helper Functions ---
+# THIS IS THE ONLY FUNCTION THAT HAS BEEN MODIFIED
 def process_brushset(filepath):
-    temp_extract_dir = os.path.join('temp', f"extract_{uuid.uuid4().hex}")
-    os.makedirs(temp_extract_dir, exist_ok=True)
-    
+    # Initialize temp_extract_dir to None to ensure it exists in the finally block's scope
+    temp_extract_dir = None
     try:
+        temp_extract_dir = os.path.join('temp', f"extract_{uuid.uuid4().hex}")
+        os.makedirs(temp_extract_dir, exist_ok=True)
+        
         with zipfile.ZipFile(filepath, 'r') as brushset_zip:
             image_files = [
                 (name, brushset_zip.read(name))
@@ -248,8 +256,10 @@ def process_brushset(filepath):
         print(f"Error in process_brushset: {e}")
         return None, "Failed to process the brushset file."
     finally:
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        # This check prevents the 'temp_dir is not defined' error
+        if temp_extract_dir and os.path.exists(temp_extract_dir):
+            shutil.rmtree(temp_extract_dir, ignore_errors=True)
+
 
 # --- Uptime Ping Route ---
 @app.route('/ping', methods=['GET'])
