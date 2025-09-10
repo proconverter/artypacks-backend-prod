@@ -44,10 +44,8 @@ def convert_files():
     if not license_key:
         return jsonify({"message": "License key is required."}), 401
 
-    # --- Step 1: VALIDATE License without spending credit ---
     try:
         with engine.connect() as connection:
-            # Calls the new, safe validation function
             result = connection.execute(text("SELECT * FROM validate_license_for_conversion(:p_license_key)"), {'p_license_key': license_key}).fetchone()
             if not result or not result[0]:
                 message = result[1] if result and result[1] else 'Invalid license or no credits remaining.'
@@ -56,7 +54,6 @@ def convert_files():
         print(f"CRITICAL ERROR in /convert during license validation: {e}")
         return jsonify({"message": "A server error occurred during license validation."}), 500
 
-    # --- Step 2: Process the Uploaded File ---
     if 'file' not in request.files:
         return jsonify({"message": "No file was uploaded."}), 400
     file = request.files['file']
@@ -72,30 +69,23 @@ def convert_files():
             filepath = os.path.join(temp_dir, original_filename)
             file.save(filepath)
             
-            # --- Step 3: Perform the Core Conversion Logic ---
             zip_buffer, error = process_brushset(filepath)
             if error:
-                # If conversion fails, we do nothing to the database. No credit was spent.
                 return jsonify({"message": error}), 400
 
-            # --- Step 4: DEDUCT CREDIT ON SUCCESS ---
-            # This is the only place a credit is spent.
             try:
                 with engine.connect() as connection:
-                    # Use a transaction to be safe
                     trans = connection.begin()
                     try:
-                        connection.execute(text("UPDATE licenses SET credits_remaining = credits_remaining - 1 WHERE license_key = :key AND credits_remaining > 0"), {'key': license_key})
+                        connection.execute(text("UPDATE licenses SET sessions_remaining = sessions_remaining - 1 WHERE license_key = :key AND sessions_remaining > 0"), {'key': license_key})
+                        # THIS IS THE CRITICAL FIX FOR ISSUE #2
                         trans.commit()
                     except:
                         trans.rollback()
                         raise
             except Exception as e:
-                # This is a critical error. The user might get a file without being charged.
                 print(f"CRITICAL ERROR: File converted but failed to deduct credit for {license_key}. Error: {e}")
-                # We still return success to the user, as they got their file.
             
-            # --- Step 5: Upload to Supabase Storage and Record Conversion ---
             base_name = os.path.splitext(original_filename)[0]
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
             zip_filename_for_storage = f"ArtyPacks.app_{base_name}_{timestamp}.zip"
@@ -109,10 +99,15 @@ def convert_files():
             public_url = supabase.storage.from_("conversions").get_public_url(zip_filename_for_storage)
 
             with engine.connect() as connection:
-                connection.execute(text(
-                    "INSERT INTO conversions (license_key, original_filename, download_url) VALUES (:key, :orig_name, :url)"
-                ), {'key': license_key, 'orig_name': original_filename, 'url': public_url})
-                connection.commit()
+                trans = connection.begin()
+                try:
+                    connection.execute(text(
+                        "INSERT INTO conversions (license_key, original_filename, download_url) VALUES (:key, :orig_name, :url)"
+                    ), {'key': license_key, 'orig_name': original_filename, 'url': public_url})
+                    trans.commit()
+                except:
+                    trans.rollback()
+                    raise
 
             return jsonify({
                 "downloadUrl": public_url,
@@ -227,22 +222,34 @@ def process_brushset(filepath):
     
     try:
         with zipfile.ZipFile(filepath, 'r') as brushset_zip:
-            image_files = [name for name in brushset_zip.namelist() if name.lower().endswith('.png') and 'artwork.png' not in name.lower()]
+            # THIS IS THE CRITICAL FIX FOR ISSUE #1
+            image_files = [name for name in brushset_zip.namelist() if name.lower().endswith(('.png', '.jpg', 'jpeg')) and 'artwork.png' not in name.lower()]
             
-            if not image_files:
-                return None, "No valid stamp images were found in the brushset."
+            valid_images_data = []
+            for image_file_name in image_files:
+                with brushset_zip.open(image_file_name) as img_file:
+                    img_data = io.BytesIO(img_file.read())
+                    try:
+                        # Restore the size check
+                        with Image.open(img_data) as img:
+                            if img.width >= 1024 and img.height >= 1024:
+                                img_data.seek(0)
+                                valid_images_data.append(img_data.read())
+                    except Exception:
+                        continue # Ignore files that are not valid images
+
+            if not valid_images_data:
+                return None, "No valid stamp images (>= 1024x1024px) were found in the brushset."
 
             original_brushset_name = os.path.splitext(os.path.basename(filepath))[0]
             root_folder_name = f"ArtyPacks.app_{original_brushset_name}"
 
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-                for i, image_file_name in enumerate(image_files):
-                    with brushset_zip.open(image_file_name) as img_file:
-                        img_content = img_file.read()
-                        image_filename_in_zip = f"{original_brushset_name}_{i + 1}.png"
-                        full_path_in_zip = os.path.join(root_folder_name, image_filename_in_zip)
-                        zf.writestr(full_path_in_zip, img_content)
+                for i, img_content in enumerate(valid_images_data):
+                    image_filename_in_zip = f"{original_brushset_name}_{i + 1}.png"
+                    full_path_in_zip = os.path.join(root_folder_name, image_filename_in_zip)
+                    zf.writestr(full_path_in_zip, img_content)
             
             zip_buffer.seek(0)
             return zip_buffer, None
@@ -254,7 +261,7 @@ def process_brushset(filepath):
         return None, "An unexpected error occurred while processing the brushset."
     finally:
         if os.path.exists(temp_extract_dir):
-            shutil.rmtree(temp_extract_dir, ignore_errors=True)
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 # --- Uptime Ping Route ---
 @app.route('/ping', methods=['GET'])
