@@ -44,23 +44,19 @@ def convert_files():
     if not license_key:
         return jsonify({"message": "License key is required."}), 401
 
+    # --- Step 1: VALIDATE License without spending credit ---
     try:
         with engine.connect() as connection:
-            trans = connection.begin()
-            try:
-                result = connection.execute(text("SELECT * FROM use_one_credit(:p_license_key)"), {'p_license_key': license_key}).fetchone()
-                if not result or not result[0]:
-                    message = result[1] if result and result[1] else 'Invalid license or no credits remaining.'
-                    trans.rollback()
-                    return jsonify({"message": message}), 403
-                trans.commit()
-            except Exception as db_exc:
-                trans.rollback()
-                raise db_exc
+            # Calls the new, safe validation function
+            result = connection.execute(text("SELECT * FROM validate_license_for_conversion(:p_license_key)"), {'p_license_key': license_key}).fetchone()
+            if not result or not result[0]:
+                message = result[1] if result and result[1] else 'Invalid license or no credits remaining.'
+                return jsonify({"message": message}), 403
     except Exception as e:
-        print(f"CRITICAL ERROR in /convert during credit use: {e}")
+        print(f"CRITICAL ERROR in /convert during license validation: {e}")
         return jsonify({"message": "A server error occurred during license validation."}), 500
 
+    # --- Step 2: Process the Uploaded File ---
     if 'file' not in request.files:
         return jsonify({"message": "No file was uploaded."}), 400
     file = request.files['file']
@@ -76,17 +72,30 @@ def convert_files():
             filepath = os.path.join(temp_dir, original_filename)
             file.save(filepath)
             
+            # --- Step 3: Perform the Core Conversion Logic ---
             zip_buffer, error = process_brushset(filepath)
             if error:
-                try:
-                    with engine.connect() as connection:
-                        connection.execute(text("UPDATE licenses SET credits_remaining = credits_remaining + 1 WHERE license_key = :key"), {'key': license_key})
-                        connection.commit()
-                        print(f"INFO: Credit refunded for {license_key} due to conversion failure.")
-                except Exception as refund_e:
-                    print(f"CRITICAL ERROR: Failed to refund credit for {license_key}. Error: {refund_e}")
+                # If conversion fails, we do nothing to the database. No credit was spent.
                 return jsonify({"message": error}), 400
 
+            # --- Step 4: DEDUCT CREDIT ON SUCCESS ---
+            # This is the only place a credit is spent.
+            try:
+                with engine.connect() as connection:
+                    # Use a transaction to be safe
+                    trans = connection.begin()
+                    try:
+                        connection.execute(text("UPDATE licenses SET credits_remaining = credits_remaining - 1 WHERE license_key = :key AND credits_remaining > 0"), {'key': license_key})
+                        trans.commit()
+                    except:
+                        trans.rollback()
+                        raise
+            except Exception as e:
+                # This is a critical error. The user might get a file without being charged.
+                print(f"CRITICAL ERROR: File converted but failed to deduct credit for {license_key}. Error: {e}")
+                # We still return success to the user, as they got their file.
+            
+            # --- Step 5: Upload to Supabase Storage and Record Conversion ---
             base_name = os.path.splitext(original_filename)[0]
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
             zip_filename_for_storage = f"ArtyPacks.app_{base_name}_{timestamp}.zip"
@@ -244,7 +253,6 @@ def process_brushset(filepath):
         print(f"Error in process_brushset: {e}")
         return None, "An unexpected error occurred while processing the brushset."
     finally:
-        # This is the corrected line.
         if os.path.exists(temp_extract_dir):
             shutil.rmtree(temp_extract_dir, ignore_errors=True)
 
