@@ -44,6 +44,7 @@ def convert_files():
     if not license_key:
         return jsonify({"message": "License key is required."}), 401
 
+    # --- Step 1: VALIDATE License without spending credit ---
     try:
         with engine.connect() as connection:
             result = connection.execute(text("SELECT * FROM validate_license_for_conversion(:p_license_key)"), {'p_license_key': license_key}).fetchone()
@@ -54,31 +55,35 @@ def convert_files():
         print(f"CRITICAL ERROR in /convert during license validation: {e}")
         return jsonify({"message": "A server error occurred during license validation."}), 500
 
+    # --- Step 2: Process the Uploaded File ---
     if 'file' not in request.files:
         return jsonify({"message": "No file was uploaded."}), 400
     file = request.files['file']
     if file.filename == '':
         return jsonify({"message": "No selected file."}), 400
 
-    temp_dir = os.path.join('temp', str(uuid.uuid4()))
-    os.makedirs(temp_dir, exist_ok=True)
-    
+    # THIS IS THE CRITICAL FIX: Initialize temp_dir to None before the try block
+    temp_dir = None
     try:
+        temp_dir = os.path.join('temp', str(uuid.uuid4()))
+        os.makedirs(temp_dir, exist_ok=True)
+
         if file and file.filename.endswith('.brushset'):
             original_filename = secure_filename(file.filename)
             filepath = os.path.join(temp_dir, original_filename)
             file.save(filepath)
             
+            # --- Step 3: Perform the Core Conversion Logic ---
             zip_buffer, error = process_brushset(filepath)
             if error:
                 return jsonify({"message": error}), 400
 
+            # --- Step 4: DEDUCT CREDIT ON SUCCESS ---
             try:
                 with engine.connect() as connection:
                     trans = connection.begin()
                     try:
                         connection.execute(text("UPDATE licenses SET sessions_remaining = sessions_remaining - 1 WHERE license_key = :key AND sessions_remaining > 0"), {'key': license_key})
-                        # THIS IS THE CRITICAL FIX FOR ISSUE #2
                         trans.commit()
                     except:
                         trans.rollback()
@@ -86,6 +91,7 @@ def convert_files():
             except Exception as e:
                 print(f"CRITICAL ERROR: File converted but failed to deduct credit for {license_key}. Error: {e}")
             
+            # --- Step 5: Upload to Supabase Storage and Record Conversion ---
             base_name = os.path.splitext(original_filename)[0]
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
             zip_filename_for_storage = f"ArtyPacks.app_{base_name}_{timestamp}.zip"
@@ -119,7 +125,8 @@ def convert_files():
         print(f"CRITICAL ERROR during file processing or upload: {e}")
         return jsonify({"message": "A critical error occurred while processing the file."}), 500
     finally:
-        if os.path.exists(temp_dir):
+        # This 'finally' block will now work correctly without crashing.
+        if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 # --- License Check Route ---
@@ -222,7 +229,6 @@ def process_brushset(filepath):
     
     try:
         with zipfile.ZipFile(filepath, 'r') as brushset_zip:
-            # THIS IS THE CRITICAL FIX FOR ISSUE #1
             image_files = [name for name in brushset_zip.namelist() if name.lower().endswith(('.png', '.jpg', 'jpeg')) and 'artwork.png' not in name.lower()]
             
             valid_images_data = []
@@ -230,13 +236,12 @@ def process_brushset(filepath):
                 with brushset_zip.open(image_file_name) as img_file:
                     img_data = io.BytesIO(img_file.read())
                     try:
-                        # Restore the size check
                         with Image.open(img_data) as img:
                             if img.width >= 1024 and img.height >= 1024:
                                 img_data.seek(0)
                                 valid_images_data.append(img_data.read())
                     except Exception:
-                        continue # Ignore files that are not valid images
+                        continue
 
             if not valid_images_data:
                 return None, "No valid stamp images (>= 1024x1024px) were found in the brushset."
@@ -261,7 +266,7 @@ def process_brushset(filepath):
         return None, "An unexpected error occurred while processing the brushset."
     finally:
         if os.path.exists(temp_extract_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            shutil.rmtree(temp_extract_dir, ignore_errors=True)
 
 # --- Uptime Ping Route ---
 @app.route('/ping', methods=['GET'])
