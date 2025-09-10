@@ -44,7 +44,6 @@ def convert_files():
     if not license_key:
         return jsonify({"message": "License key is required."}), 401
 
-    # --- Step 1: Validate License (but don't decrement yet) ---
     try:
         with engine.connect() as connection:
             result = connection.execute(text("SELECT * FROM validate_license_for_conversion(:p_license_key)"), {'p_license_key': license_key}).fetchone()
@@ -55,14 +54,12 @@ def convert_files():
         print(f"CRITICAL ERROR in /convert during license validation: {e}")
         return jsonify({"message": "A server error occurred during license validation."}), 500
 
-    # --- Step 2: Process the Uploaded File ---
     if 'file' not in request.files:
         return jsonify({"message": "No file was uploaded."}), 400
     file = request.files['file']
     if file.filename == '':
         return jsonify({"message": "No selected file."}), 400
 
-    # This variable is defined outside the try block to ensure it exists for the finally block
     temp_dir = os.path.join('temp', str(uuid.uuid4()))
     os.makedirs(temp_dir, exist_ok=True)
     
@@ -72,17 +69,14 @@ def convert_files():
             filepath = os.path.join(temp_dir, original_filename)
             file.save(filepath)
             
-            # --- Step 3: Perform the Core Conversion Logic ---
-            zip_buffer, error = process_brushset(filepath)
+            zip_buffer, error = process_brushset(filepath, temp_dir)
             if error:
                 return jsonify({"message": error}), 400
 
-            # --- Step 4: If Conversion is Successful, NOW Decrement Credit ---
             with engine.connect() as connection:
                 connection.execute(text("UPDATE licenses SET sessions_remaining = sessions_remaining - 1 WHERE license_key = :key"), {'key': license_key})
                 connection.commit()
 
-            # --- Step 5: Upload to Supabase Storage and Record Conversion ---
             base_name = os.path.splitext(original_filename)[0]
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
             zip_filename_for_storage = f"ArtyPacks.app_{base_name}_{timestamp}.zip"
@@ -111,7 +105,6 @@ def convert_files():
         print(f"CRITICAL ERROR during file processing or upload: {e}")
         return jsonify({"message": "A critical error occurred while processing the file."}), 500
     finally:
-        # The check for os.path.exists is still good practice
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -150,7 +143,6 @@ def recover_session():
 
     try:
         with engine.connect() as connection:
-            # Get ALL conversions for this key, newest first
             query = text("""
                 SELECT original_filename, download_url, created_at 
                 FROM conversions 
@@ -160,20 +152,20 @@ def recover_session():
             all_results = connection.execute(query, {'key': license_key}).fetchall()
 
             if not all_results:
-                # Return 200 OK with an empty list, which is not an error
-                return jsonify({"files": []}), 200
+                return jsonify({"message": "No conversions found for this license."}), 404
 
-            # Calculate the status for each file
             sixty_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=60)
             files_with_status = []
             for row in all_results:
-                # Ensure created_at is timezone-aware for comparison
-                created_at_aware = row[2].replace(tzinfo=timezone.utc)
-                is_expired = created_at_aware < sixty_minutes_ago
+                # Ensure created_at is timezone-aware for correct comparison
+                created_at_utc = row[2].replace(tzinfo=timezone.utc)
+                is_expired = created_at_utc < sixty_minutes_ago
+                
                 files_with_status.append({
                     "originalFilename": row[0],
                     "downloadUrl": row[1],
-                    "status": "expired" if is_expired else "active"
+                    "status": "expired" if is_expired else "active",
+                    "createdAt": created_at_utc.isoformat() # <-- THE ONLY CHANGE IS HERE
                 })
 
             return jsonify({"files": files_with_status}), 200
@@ -210,14 +202,8 @@ def download_all():
     return send_file(master_zip_buffer, as_attachment=True, download_name=master_zip_filename, mimetype='application/zip')
 
 # --- Helper Functions ---
-# THIS IS THE ONLY FUNCTION THAT HAS BEEN MODIFIED
-def process_brushset(filepath):
-    # Initialize temp_extract_dir to None to ensure it exists in the finally block's scope
-    temp_extract_dir = None
+def process_brushset(filepath, temp_dir):
     try:
-        temp_extract_dir = os.path.join('temp', f"extract_{uuid.uuid4().hex}")
-        os.makedirs(temp_extract_dir, exist_ok=True)
-        
         with zipfile.ZipFile(filepath, 'r') as brushset_zip:
             image_files = [
                 (name, brushset_zip.read(name))
@@ -256,10 +242,8 @@ def process_brushset(filepath):
         print(f"Error in process_brushset: {e}")
         return None, "Failed to process the brushset file."
     finally:
-        # This check prevents the 'temp_dir is not defined' error
-        if temp_extract_dir and os.path.exists(temp_extract_dir):
-            shutil.rmtree(temp_extract_dir, ignore_errors=True)
-
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 # --- Uptime Ping Route ---
 @app.route('/ping', methods=['GET'])
