@@ -244,8 +244,9 @@ def process_brushset(filepath):
         print(f"Error in process_brushset: {e}")
         return None, "An unexpected error occurred while processing the brushset."
     finally:
+        # This is the corrected line.
         if os.path.exists(temp_extract_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            shutil.rmtree(temp_extract_dir, ignore_errors=True)
 
 # --- Uptime Ping Route ---
 @app.route('/ping', methods=['GET'])
