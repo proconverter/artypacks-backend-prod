@@ -44,7 +44,6 @@ def convert_files():
     if not license_key:
         return jsonify({"message": "License key is required."}), 401
 
-    # --- Step 1: Validate License (but don't decrement yet) ---
     try:
         with engine.connect() as connection:
             result = connection.execute(text("SELECT * FROM get_license_status(:p_license_key)"), {'p_license_key': license_key}).fetchone()
@@ -55,7 +54,6 @@ def convert_files():
         print(f"CRITICAL ERROR in /convert during license validation: {e}")
         return jsonify({"message": "A server error occurred during license validation."}), 500
 
-    # --- Step 2: Process the Uploaded File ---
     if 'file' not in request.files:
         return jsonify({"message": "No file was uploaded."}), 400
     file = request.files['file']
@@ -71,17 +69,15 @@ def convert_files():
             filepath = os.path.join(temp_dir, original_filename)
             file.save(filepath)
             
-            # --- Step 3: Perform the Core Conversion Logic ---
             zip_buffer, error = process_brushset(filepath)
             if error:
+                shutil.rmtree(temp_dir, ignore_errors=True)
                 return jsonify({"message": error}), 400
 
-            # --- Step 4: If Conversion is Successful, NOW Decrement Credit ---
             with engine.connect() as connection:
                 connection.execute(text("SELECT * FROM use_one_credit(:p_license_key)"), {'p_license_key': license_key})
                 connection.commit()
 
-            # --- Step 5: Upload to Supabase Storage and Record Conversion ---
             base_name = os.path.splitext(original_filename)[0]
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
             zip_filename_for_storage = f"ArtyPacks.app_{base_name}_{timestamp}.zip"
@@ -208,51 +204,39 @@ def download_all():
     master_zip_buffer.seek(0)
     return send_file(master_zip_buffer, as_attachment=True, download_name=master_zip_filename, mimetype='application/zip')
 
-# --- Helper Functions ---
+# --- THE CORRECT AND FINAL HELPER FUNCTION ---
 def process_brushset(filepath):
-    # This is the CORRECT, ROBUST version of the function
     temp_extract_dir = os.path.join('temp', f"extract_{uuid.uuid4().hex}")
     os.makedirs(temp_extract_dir, exist_ok=True)
     
     try:
         with zipfile.ZipFile(filepath, 'r') as brushset_zip:
-            # Correctly filter for only image files, ignoring metadata folders
             image_files = [
                 (name, brushset_zip.read(name))
                 for name in brushset_zip.namelist()
                 if name.lower().endswith(('.png', '.jpg', '.jpeg')) and not name.startswith('__MACOSX')
             ]
             
-            # --- THIS IS THE FIX FOR THE 1024px RULE ---
             valid_images_data = []
             for original_name, img_content in image_files:
                 try:
                     with Image.open(io.BytesIO(img_content)) as img:
-                        # This check is now correctly implemented
                         if img.width >= 1024 and img.height >= 1024:
                             valid_images_data.append((original_name, img_content))
                 except Exception:
-                    # Ignore files that are not valid images
                     continue
 
             if not valid_images_data:
                 return None, "No valid stamp images (>= 1024x1024px) were found in the brushset."
 
-            # --- THIS IS THE FIX FOR THE FOLDER NAME ---
             original_brushset_name = os.path.splitext(os.path.basename(filepath))[0]
-            # This creates a clean folder name like "ArtyPacks.app_MyBrushSet"
             root_folder_name = f"ArtyPacks.app_{original_brushset_name}"
 
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-                # This loop ensures ALL valid images are processed
                 for i, (original_name, img_content) in enumerate(valid_images_data):
-                    # --- THIS IS THE FIX FOR THE IMAGE FILENAME ---
                     base, ext = os.path.splitext(os.path.basename(original_name))
-                    
-                    # Use the actual brush name if it exists, otherwise create a generic one
                     image_filename_in_zip = f"{base}{ext}" if base else f"{original_brushset_name}_{i + 1}.png"
-                    
                     full_path_in_zip = os.path.join(root_folder_name, image_filename_in_zip)
                     zf.writestr(full_path_in_zip, img_content)
             
