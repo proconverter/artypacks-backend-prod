@@ -69,7 +69,8 @@ def convert_files():
             filepath = os.path.join(temp_dir, original_filename)
             file.save(filepath)
             
-            zip_buffer, error = process_brushset(filepath)
+            # --- FIX #2: Calling the function correctly ---
+            zip_buffer, error = process_brushset(filepath, temp_dir)
             if error:
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 return jsonify({"message": error}), 400
@@ -205,16 +206,14 @@ def download_all():
     return send_file(master_zip_buffer, as_attachment=True, download_name=master_zip_filename, mimetype='application/zip')
 
 # --- THE CORRECT AND FINAL HELPER FUNCTION ---
-def process_brushset(filepath):
-    temp_extract_dir = os.path.join('temp', f"extract_{uuid.uuid4().hex}")
-    os.makedirs(temp_extract_dir, exist_ok=True)
-    
+# --- FIX #1: Defining the function correctly ---
+def process_brushset(filepath, temp_dir):
     try:
         with zipfile.ZipFile(filepath, 'r') as brushset_zip:
             image_files = [
                 (name, brushset_zip.read(name))
                 for name in brushset_zip.namelist()
-                if name.lower().endswith(('.png', '.jpg', '.jpeg')) and not name.startswith('__MACOSX')
+                if name.lower().endswith(('.png', '.jpg', '.jpeg')) and 'artwork.png' not in name.lower()
             ]
             
             valid_images_data = []
@@ -248,8 +247,9 @@ def process_brushset(filepath):
         print(f"Error in process_brushset: {e}")
         return None, "Failed to process the brushset file."
     finally:
-        if os.path.exists(temp_extract_dir):
-            shutil.rmtree(temp_extract_dir, ignore_errors=True)
+        # This finally block is now correctly scoped within the function
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 # --- Uptime Ping Route ---
 @app.route('/ping', methods=['GET'])
