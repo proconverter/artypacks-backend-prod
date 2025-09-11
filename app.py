@@ -223,26 +223,36 @@ def process_brushset(filepath):
                 if name.lower().endswith(('.png', '.jpg', '.jpeg')) and not name.startswith('__MACOSX')
             ]
             
-            if not image_files:
-                return None, "No images found in the brushset. It may be empty or a dynamic brush type."
+            # --- THIS IS THE FIX FOR THE 1024px RULE ---
+            valid_images_data = []
+            for original_name, img_content in image_files:
+                try:
+                    with Image.open(io.BytesIO(img_content)) as img:
+                        # This check is now correctly implemented
+                        if img.width >= 1024 and img.height >= 1024:
+                            valid_images_data.append((original_name, img_content))
+                except Exception:
+                    # Ignore files that are not valid images
+                    continue
 
+            if not valid_images_data:
+                return None, "No valid stamp images (>= 1024x1024px) were found in the brushset."
+
+            # --- THIS IS THE FIX FOR THE FOLDER NAME ---
             original_brushset_name = os.path.splitext(os.path.basename(filepath))[0]
-            safe_folder_name = "".join(c for c in original_brushset_name if c.isalnum() or c in (' ', '_', '-')).rstrip()
-            root_folder_name = f"ArtyPacks.app_{safe_folder_name}"
+            # This creates a clean folder name like "ArtyPacks.app_MyBrushSet"
+            root_folder_name = f"ArtyPacks.app_{original_brushset_name}"
 
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-                # This loop ensures ALL images are processed
-                for i, (original_name, img_content) in enumerate(image_files):
+                # This loop ensures ALL valid images are processed
+                for i, (original_name, img_content) in enumerate(valid_images_data):
+                    # --- THIS IS THE FIX FOR THE IMAGE FILENAME ---
                     base, ext = os.path.splitext(os.path.basename(original_name))
-                    safe_image_name = "".join(c for c in base if c.isalnum() or c in (' ', '_', '-')).rstrip()
                     
-                    if not safe_image_name:
-                        safe_image_name = f"brush_{i+1}"
-                    if not ext:
-                        ext = '.png'
-                        
-                    image_filename_in_zip = f"{safe_image_name}{ext}"
+                    # Use the actual brush name if it exists, otherwise create a generic one
+                    image_filename_in_zip = f"{base}{ext}" if base else f"{original_brushset_name}_{i + 1}.png"
+                    
                     full_path_in_zip = os.path.join(root_folder_name, image_filename_in_zip)
                     zf.writestr(full_path_in_zip, img_content)
             
@@ -254,7 +264,6 @@ def process_brushset(filepath):
         print(f"Error in process_brushset: {e}")
         return None, "Failed to process the brushset file."
     finally:
-        # This was missing from the broken version. It's critical for cleanup.
         if os.path.exists(temp_extract_dir):
             shutil.rmtree(temp_extract_dir, ignore_errors=True)
 
