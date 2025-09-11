@@ -69,7 +69,6 @@ def convert_files():
             filepath = os.path.join(temp_dir, original_filename)
             file.save(filepath)
             
-            # --- FIX #2: Calling the function correctly ---
             zip_buffer, error = process_brushset(filepath, temp_dir)
             if error:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -206,7 +205,6 @@ def download_all():
     return send_file(master_zip_buffer, as_attachment=True, download_name=master_zip_filename, mimetype='application/zip')
 
 # --- THE CORRECT AND FINAL HELPER FUNCTION ---
-# --- FIX #1: Defining the function correctly ---
 def process_brushset(filepath, temp_dir):
     try:
         with zipfile.ZipFile(filepath, 'r') as brushset_zip:
@@ -234,8 +232,9 @@ def process_brushset(filepath, temp_dir):
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for i, (original_name, img_content) in enumerate(valid_images_data):
-                    base, ext = os.path.splitext(os.path.basename(original_name))
-                    image_filename_in_zip = f"{base}{ext}" if base else f"{original_brushset_name}_{i + 1}.png"
+                    # --- THE FINAL, ROBUST NAMING LOGIC ---
+                    # This guarantees a unique, descriptive name for every file.
+                    image_filename_in_zip = f"{original_brushset_name}_{i + 1}.png"
                     full_path_in_zip = os.path.join(root_folder_name, image_filename_in_zip)
                     zf.writestr(full_path_in_zip, img_content)
             
@@ -247,7 +246,6 @@ def process_brushset(filepath, temp_dir):
         print(f"Error in process_brushset: {e}")
         return None, "Failed to process the brushset file."
     finally:
-        # This finally block is now correctly scoped within the function
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
