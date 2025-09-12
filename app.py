@@ -11,9 +11,16 @@ from supabase import create_client, Client
 from flask_cors import CORS
 from sqlalchemy import create_engine, text
 from datetime import datetime, timezone, timedelta
+from werkzeug.exceptions import RequestEntityTooLarge # NECESSARY IMPORT
 
 # --- Flask App Initialization ---
 app = Flask(__name__)
+
+# --- NECESSARY CONFIGURATION FOR FILE SIZE LIMIT ---
+# 35 MB = 35 * 1024 * 1024 bytes
+MAX_FILE_SIZE_BYTES = 36700160
+app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE_BYTES
+# ---------------------------------------------------
 
 # --- Database Configuration ---
 db_url = os.environ.get('SUPABASE_DB_URL')
@@ -35,7 +42,15 @@ allowed_origins = [
     "https://www.artypacks.app",
     "http://127.0.0.1:5500"
 ]
-CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True, expose_headers=["Content-Disposition"] )
+CORS(app, resources={r"/*": {"origins": allowed_origins}}, supports_credentials=True, expose_headers=["Content-Disposition"]  )
+
+# --- NECESSARY ERROR HANDLER FOR A USER-FRIENDLY MESSAGE ---
+@app.errorhandler(413)
+@app.errorhandler(RequestEntityTooLarge)
+def handle_file_too_large(e):
+    """Catches the error when a file exceeds MAX_CONTENT_LENGTH."""
+    return jsonify(message="File is too large. Please upload a file smaller than 35MB."), 413
+# -----------------------------------------------------------
 
 # --- Main Conversion Route ---
 @app.route('/convert', methods=['POST'])
